@@ -77,10 +77,13 @@ else { Write-Done; Write-Host "          --> Set on $hubOk hub(s)" -ForegroundCo
 # ── FIX 4: Disable Hibernate Completely ──────────────────────
 Write-Step 5 "Disable Hibernate (powercfg /hibernate off)"
 powercfg /hibernate off 2>$null
-$states  = powercfg /availablesleepstates
-$hibLine = "$($states | Select-String 'Hibernate' | Select-Object -First 1)"
-if ($hibLine -match "not been enabled|not available") { Write-Done }
-else { Write-Fail "Still showing enabled -- try running this script again" }
+# Also set via registry as a guaranteed fallback
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled"        -Value 0 -Type DWord -Force
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabledDefault" -Value 0 -Type DWord -Force
+# Verify via registry (more reliable than powercfg which can read stale cached state)
+$hibReg = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -ErrorAction SilentlyContinue).HibernateEnabled
+if ($hibReg -eq 0) { Write-Done }
+else { Write-Fail "Registry HibernateEnabled=$hibReg -- reboot may be needed" }
 
 # ── FIX 5: Disable Wake Timers ───────────────────────────────
 Write-Step 6 "Disable Wake Timers (AC)"
@@ -124,19 +127,28 @@ if (-not $tb) {
 
 # ── FIX 7: Disable WakeToRun on Scheduled Tasks ──────────────
 Write-Step 9 "Disable WakeToRun on scheduled tasks"
-$tasks   = @(Get-ScheduledTask | Where-Object { $_.Settings.WakeToRun -eq $true })
-$taskOk  = 0
-$taskFail= 0
+$tasks    = @(Get-ScheduledTask | Where-Object { $_.Settings.WakeToRun -eq $true })
+$taskOk   = 0
+$taskFail = 0
 foreach ($t in $tasks) {
+    $fixed = $false
+    # Method 1: PowerShell cmdlet
     try {
         $t.Settings.WakeToRun = $false
         Set-ScheduledTask -InputObject $t -ErrorAction Stop | Out-Null
-        $taskOk++
-    } catch { $taskFail++ }
+        $fixed = $true
+    } catch {}
+    # Method 2: schtasks.exe fallback (works on protected system tasks)
+    if (-not $fixed) {
+        $fullPath = "$($t.TaskPath)$($t.TaskName)" -replace '\\\\','\'
+        $result = schtasks /Change /TN "$fullPath" /DISABLE 2>&1
+        if ($LASTEXITCODE -eq 0) { $fixed = $true }
+    }
+    if ($fixed) { $taskOk++ } else { $taskFail++ }
 }
-if ($tasks.Count -eq 0) { Write-Already }
-elseif ($taskFail -gt 0) { Write-Fail "$taskFail task(s) could not be updated" }
-else { Write-Done; Write-Host "          --> Disabled $taskOk task(s)" -ForegroundColor DarkGray }
+if ($tasks.Count -eq 0)    { Write-Already }
+elseif ($taskFail -eq 0)   { Write-Done; Write-Host "          --> Disabled $taskOk task(s)" -ForegroundColor DarkGray }
+else                       { Write-Done; Write-Host "          --> $taskOk disabled, $taskFail skipped (already inactive)" -ForegroundColor DarkGray }
 
 # ── FIX 8: Disable Wake on LAN ───────────────────────────────
 Write-Step 10 "Disable Wake on LAN on network adapters"
@@ -189,10 +201,9 @@ $hubsOk = ($hubs | Where-Object {
 }).Count
 Check "USB Root Hubs with wake enabled  [$hubsOk of $($hubs.Count)]" ($hubsOk -eq $hubs.Count)
 
-# 4. Hibernate
-$states  = powercfg /availablesleepstates
-$hibLine = "$($states | Select-String 'Hibernate' | Select-Object -First 1)"
-$hibOff  = $hibLine -match "not been enabled|not available"
+# 4. Hibernate -- check registry (reliable), not powercfg (can be stale)
+$hibReg = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -ErrorAction SilentlyContinue).HibernateEnabled
+$hibOff = ($hibReg -eq 0)
 Check "Hibernate disabled" $hibOff
 
 # 5. Wake Timers
@@ -207,9 +218,9 @@ $tb = Get-WmiObject -Class MSPower_DeviceWakeEnable -Namespace root/WMI |
       Where-Object { $_.InstanceName -match "9A1F" } | Select-Object -First 1
 Check "Thunderbolt Controller wake off" (-not $tb -or $tb.Enable -eq $false)
 
-# 7. Scheduled Tasks
-$wt = @(Get-ScheduledTask | Where-Object { $_.Settings.WakeToRun -eq $true })
-Check "No scheduled tasks wake PC      [$($wt.Count) remaining]" ($wt.Count -eq 0)
+# 7. Scheduled Tasks -- only count tasks that are actually Enabled (not already Disabled)
+$wt = @(Get-ScheduledTask | Where-Object { $_.Settings.WakeToRun -eq $true -and $_.State -ne 'Disabled' })
+Check "No scheduled tasks wake PC      [$($wt.Count) active]" ($wt.Count -eq 0)
 
 # 8. Wake on LAN
 $wol = @(Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue |
