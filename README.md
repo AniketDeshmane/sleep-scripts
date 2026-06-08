@@ -4,6 +4,18 @@ Fix keyboard/mouse not waking PC from sleep, unexpected wake-ups, and auto-hiber
 
 ---
 
+## ⚡ Run in One Command (Fastest Way)
+
+Open **PowerShell as Administrator** and paste this:
+
+```powershell
+irm https://raw.githubusercontent.com/AniketDeshmane/sleep-scripts/main/Auto-Fix-WakeFromSleep.ps1 | iex
+```
+
+> Fixes all 10 settings automatically. No download needed. Expected result: **10 passed, 0 failed**.
+
+---
+
 ## 🚀 Quick Start — Just Run and Fix Everything
 
 > **Download** → Right-click `.cmd` file → **Run as Administrator**
